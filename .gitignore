@@ -1,0 +1,6 @@
+/ghidrarest
+/data/
+/dist/
+/distout/
+.env
+*.log

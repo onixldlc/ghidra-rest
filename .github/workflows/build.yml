@@ -1,0 +1,290 @@
+name: Build and Push
+
+# Adapted from onixldlc/BAR-content-proxy: same test / determine-version /
+# build-and-push / release shape, same buildx + ghcr + gha cache, same
+# softprops release step. Differs only where a Ghidra image differs from a
+# small stdlib proxy:
+#   - the runtime image carries a JDK and a full Ghidra install, so the runner
+#     frees disk before building and the gha cache is written in mode=min
+#   - the smoke test does not just poll /healthz, it submits a real binary and
+#     waits for the analysis to finish, because an image where Ghidra cannot
+#     start would still answer /healthz
+#
+# Every push and PR compiles and tests. Only a pushed tag v* logs in,
+# publishes the image and cuts a release. A tag push and its branch push both
+# run to completion on purpose: the branch run is the safety check, the tag
+# run is the release.
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghidra-rest
+  GO_VERSION: "1.25"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    name: Vet and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build
+        run: CGO_ENABLED=0 go build ./...
+
+      - name: Test
+        # -race because the job manager, its worker pool and the HTTP handlers
+        # all touch the same maps. No-op if no _test.go files exist (exit 0).
+        run: go test -race -count=1 ./...
+
+      - name: Assert the dependency list is still empty
+        run: |
+          # The server is stdlib-only: the only thing it shells out to is
+          # Ghidra itself. `go list -m all` lists real modules -- here, just
+          # this one.
+          self="$(go list -m)"
+          extra="$(go list -m all | grep -vx "$self" || true)"
+          if [ -n "$extra" ]; then
+            echo "dependencies appeared:"; echo "$extra"; exit 1
+          fi
+          if [ -f go.sum ]; then
+            echo "go.sum appeared, so something got vendored in"; exit 1
+          fi
+          echo "no dependencies: ${self} only"
+
+  determine-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # git describe needs tags and history.
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+            PUBLISH=true
+          else
+            VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+            PUBLISH=false
+          fi
+          # Docker tags allow a narrow character set; sanitise rather than fail.
+          VERSION="$(printf '%s' "${VERSION}" | tr -c 'A-Za-z0-9._-' '-')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "publish=${PUBLISH}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION} publish=${PUBLISH}"
+
+  build-and-push:
+    name: Build image
+    runs-on: ubuntu-latest
+    needs: [test, determine-version]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        # A JDK base plus an unpacked Ghidra is several GiB per architecture,
+        # and the hosted runner ships ~14 GiB free. These trees are never used
+        # by this build.
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/share/swift || true
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build amd64 locally
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          load: true
+          build-args: |
+            VERSION=${{ needs.determine-version.outputs.version }}
+          tags: ${{ env.IMAGE_NAME }}:ci
+          cache-from: type=gha
+          # mode=min: the Ghidra download layer alone is over 500 MiB, and
+          # mode=max would push every intermediate layer into the cache.
+          cache-to: type=gha,mode=min
+
+      - name: Smoke test
+        # Not just a health probe: submit a real binary, wait for the job to
+        # reach `done`, then read results back. An image where the JDK, the
+        # Ghidra install or the export script is broken passes /healthz and
+        # fails here.
+        run: |
+          set -euo pipefail
+          docker run -d --rm -p 8080:8080 --name grci "${IMAGE_NAME}:ci"
+
+          ok=0
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/healthz 2>/dev/null | grep -qx ok; then
+              ok=1; break
+            fi
+            sleep 1
+          done
+          if [ "$ok" != 1 ]; then
+            docker logs grci || true; docker rm -f grci || true
+            echo "healthz never returned ok"; exit 1
+          fi
+          echo "healthy"
+
+          curl -fsS http://127.0.0.1:8080/v1/version
+
+          id="$(curl -fsS -F file=@/bin/ls -F decompile=true \
+                http://127.0.0.1:8080/v1/jobs | sed -n 's/.*"id":"\([a-f0-9]*\)".*/\1/p')"
+          echo "job ${id}"
+
+          status=""
+          for i in $(seq 1 120); do
+            status="$(curl -fsS "http://127.0.0.1:8080/v1/jobs/${id}" \
+                      | sed -n 's/.*"status":"\([a-z]*\)".*/\1/p')"
+            [ "$status" = "done" ] && break
+            [ "$status" = "failed" ] && break
+            sleep 5
+          done
+          echo "job status: ${status}"
+
+          if [ "$status" != "done" ]; then
+            curl -fsS "http://127.0.0.1:8080/v1/jobs/${id}/log?tail=4000" || true
+            docker logs grci || true; docker rm -f grci || true
+            exit 1
+          fi
+
+          curl -fsS "http://127.0.0.1:8080/v1/results/${id}/summary"
+          funcs="$(curl -fsS "http://127.0.0.1:8080/v1/results/${id}/functions?limit=1" \
+                   | sed -n 's/.*"total":\([0-9]*\).*/\1/p')"
+          echo "functions: ${funcs}"
+          docker rm -f grci || true
+          if [ -z "${funcs}" ] || [ "${funcs}" -lt 1 ]; then
+            echo "analysis produced no functions"; exit 1
+          fi
+          echo "smoke test passed"
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+
+      - name: Log in to GitHub Container Registry
+        if: needs.determine-version.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch
+        if: needs.determine-version.outputs.publish == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ needs.determine-version.outputs.version }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.determine-version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
+      - name: Summary
+        run: |
+          V="${{ needs.determine-version.outputs.version }}"
+          IMG="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}"
+          echo "**Version:** \`${V}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Published:** ${{ needs.determine-version.outputs.publish }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${IMG}:${V}\` (linux/amd64, linux/arm64)" >> $GITHUB_STEP_SUMMARY
+
+  release:
+    name: Release binaries
+    runs-on: ubuntu-latest
+    needs: [test, determine-version, build-and-push]
+    if: needs.determine-version.outputs.publish == 'true'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Cross compile every release binary
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: dist
+          build-args: |
+            VERSION=${{ needs.determine-version.outputs.version }}
+          outputs: type=local,dest=dist
+          cache-from: type=gha
+
+      - name: Package
+        run: |
+          V="${{ needs.determine-version.outputs.version }}"
+          cd dist
+          ls -l
+          for f in ghidrarest-*; do
+            case "$f" in
+              *.exe)
+                # Archive members are named plainly, so an extract drops a
+                # `ghidrarest` (or ghidrarest.exe) on PATH, not the
+                # triple-suffixed build name.
+                cp "$f" ghidrarest.exe
+                zip -X "${f%.exe}-${V}.zip" ghidrarest.exe
+                rm ghidrarest.exe
+                ;;
+              *)
+                tar -czf "${f}-${V}.tar.gz" --transform='s|.*|ghidrarest|' "$f"
+                ;;
+            esac
+          done
+          sha256sum *.tar.gz *.zip ghidrarest-linux-amd64 | tee checksums.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/ghidrarest-linux-amd64
+            dist/checksums.txt
+
+      - name: Summary
+        run: |
+          V="${{ needs.determine-version.outputs.version }}"
+          echo "**Release:** \`${V}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Assets:** linux amd64/arm64/386, darwin amd64/arm64, windows amd64, \`checksums.txt\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "These binaries are the server only; they need a Ghidra install pointed at by \`GHIDRAREST_GHIDRA_HOME\`." >> $GITHUB_STEP_SUMMARY

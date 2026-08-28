@@ -1,0 +1,38 @@
+services:
+  ghidra-rest:
+    image: ghcr.io/onixldlc/ghidra-rest:latest
+    container_name: ghidra-rest
+    restart: unless-stopped
+    ports:
+      # Loopback by default: the service runs an analyzer over files anyone
+      # who can reach it uploads. Publish it wider only behind auth.
+      - "127.0.0.1:8080:8080"
+    # Literal values on purpose. `${VAR:-default}` interpolation is a
+    # docker-compose feature; podman-compose passes the string through
+    # verbatim, which lands "${GHIDRAREST_MAX_CONCURRENT:-2}" in the
+    # container as a literal. Edit these directly, or point at an env file
+    # with `docker compose --env-file ...`. Every knob is documented in
+    # .env.example.
+    environment:
+      GHIDRAREST_MAX_CONCURRENT: "2"
+      GHIDRAREST_JAVA_MAX_MEM: "2G"
+      GHIDRAREST_ANALYSIS_TIMEOUT: "30m"
+      GHIDRAREST_DECOMPILE: "true"
+      GHIDRAREST_VERBOSE: "false"
+      # Set a token before exposing this beyond localhost.
+      GHIDRAREST_API_TOKEN: ""
+    volumes:
+      - ghidra-rest-data:/data
+    # Declared here as well as in the Dockerfile. Docker honours the image's
+    # HEALTHCHECK directly, but podman drops it unless the image is built
+    # with `--format docker` (OCI images have no healthcheck field). A
+    # compose-level healthcheck works on both regardless of image format.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/verify.sh"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  ghidra-rest-data:

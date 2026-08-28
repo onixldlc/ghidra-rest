@@ -1,0 +1,7 @@
+.git
+.github
+data
+dist
+distout
+*.log
+README.md

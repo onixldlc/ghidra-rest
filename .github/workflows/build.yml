@@ -4,8 +4,8 @@ name: Build and Push
 # build-and-push / release shape, same buildx + ghcr + gha cache, same
 # softprops release step. Differs only where a Ghidra image differs from a
 # small stdlib proxy:
-#   - the runtime image carries a JDK and a full Ghidra install, so the runner
-#     frees disk before building and the gha cache is written in mode=min
+#   - the runtime image carries a JDK and a full Ghidra install, so the gha
+#     cache is written in mode=min
 #   - the smoke test does not just poll /healthz, it submits a real binary and
 #     waits for the analysis to finish, because an image where Ghidra cannot
 #     start would still answer /healthz
@@ -109,16 +109,6 @@ jobs:
     needs: [test, determine-version]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Free disk space
-        # A JDK base plus an unpacked Ghidra is several GiB per architecture,
-        # and the hosted runner ships ~14 GiB free. These trees are never used
-        # by this build.
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost /usr/share/swift || true
-          df -h /
 
       - uses: docker/setup-buildx-action@v3
 
@@ -254,7 +244,6 @@ jobs:
         run: |
           V="${{ needs.determine-version.outputs.version }}"
           cd dist
-          ls -l
           for f in ghidrarest-*; do
             case "$f" in
               *.exe)

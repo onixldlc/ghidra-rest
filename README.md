@@ -91,12 +91,16 @@ description of the API that cannot go stale.
 The release assets are the **server only**. They contain no Ghidra and no
 export script -- the container image is the batteries-included option.
 
+Every target ships as a zip whose single member is a plain `ghidrarest`
+(`ghidrarest.exe` on windows), so an extract drops it straight on PATH.
+
 ```sh
 V=v1.0.0
-curl -LO https://github.com/onixldlc/ghidra-rest/releases/download/$V/ghidrarest-linux-amd64-$V.tar.gz
-curl -LO https://github.com/onixldlc/ghidra-rest/releases/download/$V/checksums.txt
+BASE=https://github.com/onixldlc/ghidra-rest/releases/download/$V
+curl -LO $BASE/ghidrarest-linux-amd64-$V.zip
+curl -LO $BASE/checksums.txt
 sha256sum -c --ignore-missing checksums.txt
-tar xzf ghidrarest-linux-amd64-$V.tar.gz     # extracts a plain `ghidrarest`
+unzip ghidrarest-linux-amd64-$V.zip
 sudo install -m755 ghidrarest /usr/local/bin/
 ```
 
@@ -131,9 +135,8 @@ Two flags: `ghidrarest -version`, and `ghidrarest -healthcheck` (exits 0 or 1
 after probing `127.0.0.1:<port>/healthz` -- it is what the image's HEALTHCHECK
 runs, which is why the image ships no curl).
 
-The windows asset is a `.zip` holding `ghidrarest.exe`, same variables. Cancel
-there only kills the launcher, not the JVM: POSIX process groups do not exist
-on windows.
+The windows asset holds `ghidrarest.exe`, same variables. Cancel there only
+kills the launcher, not the JVM: POSIX process groups do not exist on windows.
 
 ## Configuration
 

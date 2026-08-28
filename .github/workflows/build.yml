@@ -18,9 +18,9 @@ name: Build and Push
 on:
   push:
     tags: ["v*"]
-  #   branches: [master, main]
-  # pull_request:
-  #   branches: [master, main]
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
   workflow_dispatch:
 
 env:
@@ -241,39 +241,36 @@ jobs:
           cache-from: type=gha
 
       - name: Package
+        # One archive format for every target: zip. Members are named plainly,
+        # so an extract drops a `ghidrarest` (or ghidrarest.exe) on PATH rather
+        # than the triple-suffixed build name.
         run: |
+          set -eu
           V="${{ needs.determine-version.outputs.version }}"
           cd dist
           for f in ghidrarest-*; do
+            member=ghidrarest
+            name="${f}"
             case "$f" in
-              *.exe)
-                # Archive members are named plainly, so an extract drops a
-                # `ghidrarest` (or ghidrarest.exe) on PATH, not the
-                # triple-suffixed build name.
-                cp "$f" ghidrarest.exe
-                zip -X "${f%.exe}-${V}.zip" ghidrarest.exe
-                rm ghidrarest.exe
-                ;;
-              *)
-                tar -czf "${f}-${V}.tar.gz" --transform='s|.*|ghidrarest|' "$f"
-                ;;
+              *.exe) member=ghidrarest.exe; name="${f%.exe}" ;;
             esac
+            cp "$f" "$member"
+            zip -qX "${name}-${V}.zip" "$member"
+            rm "$member" "$f"
           done
-          sha256sum *.tar.gz *.zip ghidrarest-linux-amd64 | tee checksums.txt
+          sha256sum *.zip | tee checksums.txt
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.tar.gz
             dist/*.zip
-            dist/ghidrarest-linux-amd64
             dist/checksums.txt
 
       - name: Summary
         run: |
           V="${{ needs.determine-version.outputs.version }}"
           echo "**Release:** \`${V}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Assets:** linux amd64/arm64/386, darwin amd64/arm64, windows amd64, \`checksums.txt\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Assets:** zips for linux amd64/arm64/386, darwin amd64/arm64, windows amd64, plus \`checksums.txt\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "These binaries are the server only; they need a Ghidra install pointed at by \`GHIDRAREST_GHIDRA_HOME\`." >> $GITHUB_STEP_SUMMARY

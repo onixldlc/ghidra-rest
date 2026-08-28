@@ -9,8 +9,8 @@
 # machine that runs them, pointed at by GHIDRAREST_GHIDRA_HOME. The container
 # image is the batteries-included option.
 #
-# Naming is ghidrarest-<os>-<arch>[.exe]. The workflow repackages these into
-# archives whose single member is a plain `ghidrarest`, so an extract drops the
+# Naming is ghidrarest-<os>-<arch>[.exe]. The workflow repackages each one into
+# a zip whose single member is a plain `ghidrarest`, so an extract drops the
 # binary on PATH, not a long triple-suffixed name.
 set -eu
 

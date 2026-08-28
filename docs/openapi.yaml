@@ -1,0 +1,1156 @@
+openapi: 3.1.0
+
+# Machine-readable twin of docs/API.md. Both describe the same server; if they
+# ever disagree, the handlers in src/internal/api are the truth.
+
+info:
+  title: ghidra-rest
+  version: "v1"
+  summary: REST API in front of Ghidra's headless analyzer.
+  description: |
+    Upload a binary, poll the job, read back functions, decompiled C, strings,
+    symbols, imports, exports, types, cross references and raw bytes as JSON.
+
+    One job is one `analyzeHeadless` run that exports a complete artifact set
+    and exits. Result endpoints only read those files, so they answer `409`
+    until the job reaches `done`.
+
+    Addresses accept `401000`, `0x401000`, `00401000` and `RAM:00401000`; they
+    normalise to the same key (lower case, no `0x`, no leading zeros, address
+    space prefix kept).
+  license:
+    name: See repository
+
+externalDocs:
+  description: Prose reference with example bodies
+  url: https://github.com/onixldlc/ghidra-rest/blob/main/docs/API.md
+
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local container or binary
+
+# Both schemes are the same shared token. Applied globally; it is enforced only
+# when GHIDRAREST_API_TOKEN is set, and /healthz opts out entirely.
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+
+tags:
+  - name: service
+    description: Health, version and capability discovery.
+  - name: jobs
+    description: Submitting binaries and managing analysis jobs.
+  - name: results
+    description: Artifacts of a finished job.
+
+paths:
+  /healthz:
+    get:
+      tags: [service]
+      operationId: healthz
+      summary: Liveness probe
+      description: |
+        Plain text `ok`. Never requires the API token, so container
+        healthchecks keep working when a token is configured.
+      security: []
+      responses:
+        "200":
+          description: Alive
+          content:
+            text/plain:
+              schema:
+                type: string
+                examples: ["ok\n"]
+
+  /v1/health:
+    get:
+      tags: [service]
+      operationId: health
+      summary: Queue and worker counts
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, examples: ["ok"] }
+                  jobs: { type: integer, description: Jobs known to the server. }
+                  running: { type: integer }
+                  queued: { type: integer }
+                  workers: { type: integer, description: Configured concurrency. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/version:
+    get:
+      tags: [service]
+      operationId: version
+      summary: Service and Ghidra versions
+      description: |
+        `ghidra_version` is read from `$GHIDRA_HOME/Ghidra/application.properties`
+        at startup, not from an environment variable, so it cannot misreport
+        what analysed a binary. `unknown` means `GHIDRAREST_GHIDRA_HOME` is
+        wrong.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service: { type: string, examples: ["ghidra-rest"] }
+                  version: { type: string, examples: ["1.0.0"] }
+                  api: { type: string, examples: ["v1"] }
+                  ghidra_version: { type: string, examples: ["12.1.3"] }
+                  ghidra_home: { type: string, examples: ["/opt/ghidra"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/capabilities:
+    get:
+      tags: [service]
+      operationId: capabilities
+      summary: Live limits, features and endpoint list
+      description: For clients that would rather discover caps than hard code them.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Capabilities" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/jobs:
+    get:
+      tags: [jobs]
+      operationId: listJobs
+      summary: List jobs, newest first
+      parameters:
+        - name: status
+          in: query
+          description: Filter by lifecycle state.
+          schema: { $ref: "#/components/schemas/JobStatus" }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer, description: Matching jobs before paging. }
+                  count: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  jobs:
+                    type: array
+                    items: { $ref: "#/components/schemas/Job" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+    post:
+      tags: [jobs]
+      operationId: submitJob
+      summary: Submit a binary (multipart)
+      description: |
+        The binary goes in a part named `file`; the options are ordinary form
+        fields. Identical bytes are deduplicated by sha256 unless `force` is
+        set, which answers `200` with the existing job instead of burning
+        another Ghidra run. Jobs that ended `failed` or `canceled` are not
+        reused.
+
+        Zero or absent numeric options mean "use the server default"; the
+        returned job records the resolved values, so it shows what actually ran.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The binary. Analysed, never executed.
+                name:
+                  type: string
+                  description: |
+                    Stored name. Defaults to the upload's filename. Reduced to
+                    a sanitised basename, 128 chars max.
+                decompile:
+                  type: boolean
+                  description: Decompile functions during the run. Default `GHIDRAREST_DECOMPILE`.
+                decompile_max_funcs:
+                  type: integer
+                  description: Stop decompiling after this many functions. Analysis still completes.
+                decompile_timeout_sec:
+                  type: integer
+                  description: Per-function decompiler timeout.
+                analysis_timeout_sec:
+                  type: integer
+                  description: |
+                    Wall-clock budget for the whole job. Ghidra's own
+                    `-analysisTimeoutPerFile` is set to 3/4 of it so the
+                    exporter still gets to run.
+                processor:
+                  type: string
+                  description: Force a language id.
+                  examples: ["x86:LE:64:default"]
+                compiler_spec:
+                  type: string
+                  examples: ["gcc"]
+                loader:
+                  type: string
+                  examples: ["BinaryLoader"]
+                force:
+                  type: boolean
+                  description: Analyse even if these exact bytes were analysed before.
+            encoding:
+              file:
+                contentType: application/octet-stream
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "200": { $ref: "#/components/responses/JobDeduplicated" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "503": { $ref: "#/components/responses/QueueFull" }
+
+  /v1/jobs/base64:
+    post:
+      tags: [jobs]
+      operationId: submitJobBase64
+      summary: Submit a binary (JSON)
+      description: |
+        Same semantics as the multipart endpoint, for clients that would
+        rather not build a multipart body. The body limit is
+        `max_upload_bytes * 4/3 + 1 MiB`, since base64 costs a third more than
+        the payload it carries.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data_base64]
+              properties:
+                data_base64:
+                  type: string
+                  format: byte
+                  description: Standard base64. `data` is accepted as an alias.
+                data:
+                  type: string
+                  format: byte
+                  description: Alias for `data_base64`.
+                filename: { type: string }
+                force: { type: boolean }
+                decompile:
+                  type: [boolean, "null"]
+                  description: Null or absent means the server default.
+                decompile_max_funcs: { type: integer, description: 0 means the server default. }
+                decompile_timeout_sec: { type: integer, description: 0 means the server default. }
+                analysis_timeout_sec: { type: integer, description: 0 means the server default. }
+                processor: { type: string }
+                compiler_spec: { type: string }
+                loader: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "200": { $ref: "#/components/responses/JobDeduplicated" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "503": { $ref: "#/components/responses/QueueFull" }
+
+  /v1/jobs/{id}:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [jobs]
+      operationId: getJob
+      summary: One job record
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [jobs]
+      operationId: deleteJob
+      summary: Delete a job and its artifacts
+      description: Removes the input, the log and every artifact. Cancel a live job first.
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Still queued or running
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/jobs/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      tags: [jobs]
+      operationId: cancelJob
+      summary: Cancel a queued or running job
+      description: |
+        A queued job is cancelled outright. A running one has its whole
+        `analyzeHeadless` process group killed -- the launcher shell and the
+        JVM it exec'd -- so no orphan keeps writing into a dead job.
+      responses:
+        "200":
+          description: Cancelled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Already finished
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/jobs/{id}/log:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [jobs]
+      operationId: getJobLog
+      summary: The analyzeHeadless transcript
+      description: |
+        Starts with the exact argv that was run. Available while the job is
+        still running, which is what you want on a long analysis.
+      parameters:
+        - name: tail
+          in: query
+          description: Return only the last N bytes.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such job, or no log written yet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/jobs/{id}/input:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [jobs]
+      operationId: getJobInput
+      summary: The submitted bytes back
+      responses:
+        "200":
+          description: OK
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+              description: Attachment, with the stored filename.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/jobs/{id}/export:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [jobs]
+      operationId: exportJob
+      summary: Every artifact as one zip
+      description: |
+        The artifact tree plus `meta.json` and `headless.log`, deflated and
+        streamed rather than staged on disk.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/summary:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [results]
+      operationId: getSummary
+      summary: Program summary
+      description: |
+        `summary.json` is written last by the export script, so its presence
+        is what marks an artifact set complete.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Summary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/functions:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/Limit"
+      - $ref: "#/components/parameters/Offset"
+      - $ref: "#/components/parameters/Query"
+    get:
+      tags: [results]
+      operationId: listFunctions
+      summary: Functions, paged
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Function" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/ArtifactMissing" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/function/{addr}:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/Addr"
+    get:
+      tags: [results]
+      operationId: getFunction
+      summary: One function record
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Function" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No function starts at that address
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/function/{addr}/decompile:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/Addr"
+    get:
+      tags: [results]
+      operationId: decompileFunction
+      summary: Decompiled C for one function
+      parameters:
+        - name: format
+          in: query
+          description: "`c` returns the listing alone as `text/x-c`."
+          schema: { type: string, enum: [c] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Decompiled" }
+            text/x-c:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: |
+            No listing. The message distinguishes the causes: the job was
+            submitted with `decompile=false`, the function is past
+            `decompile_max_funcs`, it is external, or it is not a function.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/decompiled:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/Limit"
+      - $ref: "#/components/parameters/Offset"
+      - $ref: "#/components/parameters/Query"
+    get:
+      tags: [results]
+      operationId: listDecompiled
+      summary: Index of what was decompiled
+      description: Cheaper than walking every function to find out.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/DecompiledIndexEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/ArtifactMissing" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/xrefs/{addr}:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/Addr"
+    get:
+      tags: [results]
+      operationId: getXrefs
+      summary: References to and from an address
+      description: |
+        Always `200` for a finished job. `indexed: false` with empty arrays
+        means the address is not in the xref index, which distinguishes
+        "nothing references this" from a typo'd address.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/XrefsResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/ArtifactMissing" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/strings:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/Limit"
+      - $ref: "#/components/parameters/Offset"
+      - $ref: "#/components/parameters/Query"
+    get:
+      tags: [results]
+      operationId: listStrings
+      summary: Defined strings, paged
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/StringEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/ArtifactMissing" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/symbols:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/Limit"
+      - $ref: "#/components/parameters/Offset"
+      - $ref: "#/components/parameters/Query"
+    get:
+      tags: [results]
+      operationId: listSymbols
+      summary: Symbol table, paged
+      description: Dynamic symbols excluded.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Symbol" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/ArtifactMissing" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/imports:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/Limit"
+      - $ref: "#/components/parameters/Offset"
+      - $ref: "#/components/parameters/Query"
+    get:
+      tags: [results]
+      operationId: listImports
+      summary: External locations, paged
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Import" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/ArtifactMissing" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/exports:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/Limit"
+      - $ref: "#/components/parameters/Offset"
+      - $ref: "#/components/parameters/Query"
+    get:
+      tags: [results]
+      operationId: listExports
+      summary: External entry points, paged
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Export" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/ArtifactMissing" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/types:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/Limit"
+      - $ref: "#/components/parameters/Offset"
+      - $ref: "#/components/parameters/Query"
+    get:
+      tags: [results]
+      operationId: listTypes
+      summary: Data types, paged
+      description: Structs, unions, enums, typedefs and function definitions.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/TypeEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/ArtifactMissing" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/memory:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [results]
+      operationId: listMemoryBlocks
+      summary: Memory block index
+      description: |
+        Served whole, not paged. `bytes_exported` can be below `size`: the
+        exporter stops at `GHIDRAREST_MAX_EXPORT_BYTES` across the program.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MemBlock" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/ArtifactMissing" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/hexdump/{addr}:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/Addr"
+    get:
+      tags: [results]
+      operationId: hexdump
+      summary: Raw bytes at an address
+      description: |
+        Reads from the block dumps the export script wrote. Reads stop at the
+        end of a block rather than running into the next one, which may not be
+        contiguous.
+      parameters:
+        - name: length
+          in: query
+          description: Bytes to read. Clamped to `max_hexdump_bytes`.
+          schema: { type: integer, minimum: 1, default: 256 }
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, text, raw]
+            default: json
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Hexdump" }
+            text/plain:
+              schema:
+                type: string
+                description: "`hexdump -C` layout, program addresses in the left column."
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Address is in no block, or the block is uninitialised (`.bss`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409": { $ref: "#/components/responses/NotDone" }
+        "416":
+          description: Inside a known block, but past its exported bytes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <token>`. Enforced only when
+        `GHIDRAREST_API_TOKEN` is set; unset means the API is fully open.
+        Comparison is constant time.
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: The same shared token, for clients that prefer a custom header.
+
+  parameters:
+    JobId:
+      name: id
+      in: path
+      required: true
+      description: Job id, 24 hex characters.
+      schema: { type: string, pattern: "^[0-9a-f]{24}$" }
+      examples:
+        ls: { value: "346ab74fe7fee34191cc8adb" }
+    Addr:
+      name: addr
+      in: path
+      required: true
+      description: |
+        Address in any accepted form: `401000`, `0x401000`, `00401000`,
+        `RAM:00401000`.
+      schema: { type: string }
+      examples:
+        plain: { value: "104000" }
+        prefixed: { value: "0x00104000" }
+        space: { value: "external:1" }
+    Limit:
+      name: limit
+      in: query
+      description: Page size. Defaults to `GHIDRAREST_PAGE_SIZE`, clamped to `max_page_size`.
+      schema: { type: integer, minimum: 1 }
+    Offset:
+      name: offset
+      in: query
+      description: Past the end returns an empty `items`, not an error.
+      schema: { type: integer, minimum: 0, default: 0 }
+    Query:
+      name: q
+      in: query
+      description: |
+        Case-insensitive substring over whichever of `name`, `full_name`,
+        `value`, `address`, `library`, `type`, `kind` that artifact has.
+      schema: { type: string }
+
+  responses:
+    JobAccepted:
+      description: Queued
+      headers:
+        Location:
+          schema: { type: string }
+          description: Path of the new job.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SubmitResponse" }
+    JobDeduplicated:
+      description: These exact bytes were already analysed; the existing job is returned
+      headers:
+        Location:
+          schema: { type: string }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SubmitResponse" }
+    BadRequest:
+      description: Malformed body, bad base64, missing `file` part, or empty upload
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: A token is configured and the request did not carry it
+      headers:
+        WWW-Authenticate:
+          schema: { type: string, examples: ['Bearer realm="ghidra-rest"'] }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such job
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ArtifactMissing:
+      description: No such job, or that artifact was never written for it
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotDone:
+      description: The job has not reached `done`, so it has no results
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooLarge:
+      description: Upload over `max_upload_bytes`
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    QueueFull:
+      description: The analysis queue is full
+      headers:
+        Retry-After:
+          schema: { type: string, examples: ["30"] }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      description: Every error in this API has this shape.
+      required: [error, status]
+      properties:
+        error: { type: string }
+        status: { type: integer }
+      examples:
+        - { error: "job is running, results are not available", status: 409 }
+
+    JobStatus:
+      type: string
+      enum: [queued, running, done, failed, canceled]
+      description: |
+        `queued` -> `running` -> one of `done`, `failed`, `canceled`. Jobs that
+        were live when the process died come back as `failed` with
+        "interrupted by a server restart".
+
+    JobOptions:
+      type: object
+      description: The resolved options -- what actually ran, not what was asked for.
+      properties:
+        decompile: { type: boolean }
+        decompile_max_funcs: { type: integer }
+        decompile_timeout_sec: { type: integer }
+        analysis_timeout_sec: { type: integer }
+        processor: { type: string }
+        compiler_spec: { type: string }
+        loader: { type: string }
+
+    Job:
+      type: object
+      properties:
+        id: { type: string, examples: ["346ab74fe7fee34191cc8adb"] }
+        filename: { type: string, examples: ["ls.bin"] }
+        size: { type: integer, description: Bytes submitted. }
+        sha256: { type: string, description: Of the submitted bytes; the dedup key. }
+        status: { $ref: "#/components/schemas/JobStatus" }
+        error:
+          type: string
+          description: Set on `failed`/`canceled`. Failures carry the tail of the headless log.
+        options: { $ref: "#/components/schemas/JobOptions" }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        duration_ms: { type: integer }
+        ghidra_version: { type: string }
+        language: { type: string, description: Lifted from the summary when the job finishes. }
+        executable_format: { type: string }
+        counts:
+          type: object
+          additionalProperties: { type: integer }
+          examples:
+            - { functions: 575, strings: 510, symbols: 1833, imports: 122,
+                exports: 18, types: 76, xref_entries: 1483, decompiled: 575,
+                decompile_failed: 0 }
+
+    SubmitResponse:
+      type: object
+      properties:
+        job: { $ref: "#/components/schemas/Job" }
+        deduplicated:
+          type: boolean
+          description: True when the bytes matched an existing job and nothing was re-analysed.
+
+    Page:
+      type: object
+      description: Envelope shared by every list endpoint.
+      properties:
+        total: { type: integer, description: "Count after filtering, so `?q=` plus paging is coherent." }
+        count: { type: integer, description: Items in this page. }
+        limit: { type: integer }
+        offset: { type: integer }
+        query: { type: string, description: "Echo of `?q=`, omitted when absent." }
+        items: { type: array, items: {} }
+
+    Capabilities:
+      type: object
+      properties:
+        service: { type: string }
+        version: { type: string }
+        ghidra_version: { type: string }
+        limits:
+          type: object
+          properties:
+            max_upload_bytes: { type: integer }
+            max_concurrent: { type: integer }
+            queue_size: { type: integer }
+            analysis_timeout_sec: { type: integer }
+            decompile_timeout_sec: { type: integer }
+            decompile_max_funcs: { type: integer }
+            max_export_bytes: { type: integer }
+            max_page_size: { type: integer }
+            max_hexdump_bytes: { type: integer }
+        features: { type: array, items: { type: string } }
+        endpoints: { type: array, items: { type: string } }
+
+    Summary:
+      type: object
+      description: The whole `summary.json`, served through untouched.
+      properties:
+        name: { type: string }
+        executable_path: { type: string }
+        executable_format: { type: string, examples: ["Executable and Linking Format (ELF)"] }
+        md5: { type: string }
+        sha256: { type: string }
+        language: { type: string, examples: ["x86:LE:64:default"] }
+        processor: { type: string, examples: ["x86"] }
+        endian: { type: string, enum: [little, big] }
+        address_size: { type: integer }
+        compiler_spec: { type: string, examples: ["gcc"] }
+        image_base: { type: string }
+        min_address: { type: string }
+        max_address: { type: string }
+        creation_date: { type: string }
+        ghidra_version: { type: string }
+        memory_bytes_exported: { type: integer }
+        counts:
+          type: object
+          additionalProperties: { type: integer }
+        entry_points: { type: array, items: { type: string } }
+
+    Parameter:
+      type: object
+      properties:
+        name: { type: string }
+        type: { type: string }
+        ordinal: { type: integer }
+
+    CallEdge:
+      type: object
+      properties:
+        address: { type: string }
+        name: { type: string }
+
+    Function:
+      type: object
+      properties:
+        address: { type: string, description: Normalised key. }
+        address_display: { type: string, description: Ghidra's own rendering. }
+        name: { type: string }
+        namespace: { type: string }
+        signature: { type: string }
+        calling_convention: { type: string }
+        return_type: { type: string }
+        size: { type: integer }
+        parameter_count: { type: integer }
+        is_thunk: { type: boolean }
+        is_external: { type: boolean }
+        is_inline: { type: boolean }
+        has_varargs: { type: boolean }
+        no_return: { type: boolean }
+        stack_frame_size: { type: integer }
+        parameters: { type: array, items: { $ref: "#/components/schemas/Parameter" } }
+        calls: { type: array, items: { $ref: "#/components/schemas/CallEdge" } }
+        called_by: { type: array, items: { $ref: "#/components/schemas/CallEdge" } }
+
+    Decompiled:
+      type: object
+      properties:
+        address: { type: string }
+        address_display: { type: string }
+        name: { type: string }
+        signature: { type: string }
+        ok: { type: boolean }
+        error: { type: string }
+        c: { type: string, description: The decompiled listing. }
+
+    DecompiledIndexEntry:
+      type: object
+      properties:
+        address: { type: string }
+        name: { type: string }
+        ok: { type: boolean }
+        length: { type: integer, description: Characters of C. }
+
+    Xref:
+      type: object
+      properties:
+        address: { type: string }
+        address_display: { type: string }
+        type: { type: string, examples: ["DATA"] }
+        is_call: { type: boolean }
+        is_jump: { type: boolean }
+        is_data: { type: boolean }
+        source: { type: string, examples: ["IMPORTED"] }
+
+    XrefsResponse:
+      type: object
+      properties:
+        address: { type: string }
+        to: { type: array, items: { $ref: "#/components/schemas/Xref" } }
+        from: { type: array, items: { $ref: "#/components/schemas/Xref" } }
+        indexed:
+          type: boolean
+          description: False means the address is not in the xref index at all.
+
+    StringEntry:
+      type: object
+      properties:
+        address: { type: string }
+        address_display: { type: string }
+        value: { type: string }
+        type: { type: string, examples: ["TerminatedCString"] }
+        length: { type: integer }
+        reference_count: { type: integer }
+
+    Symbol:
+      type: object
+      properties:
+        address: { type: string }
+        address_display: { type: string }
+        name: { type: string }
+        full_name: { type: string }
+        type: { type: string, examples: ["Function"] }
+        source: { type: string, examples: ["IMPORTED"] }
+        namespace: { type: string }
+        primary: { type: boolean }
+        global: { type: boolean }
+        external: { type: boolean }
+        reference_count: { type: integer }
+
+    Import:
+      type: object
+      properties:
+        library: { type: string, examples: ["<EXTERNAL>"] }
+        name: { type: string }
+        original_name: { type: string }
+        is_function: { type: boolean }
+        address: { type: string, description: Empty when the import has no resolved address. }
+        thunk_address:
+          type: string
+          description: Where to look this symbol up in the other artifacts.
+
+    Export:
+      type: object
+      properties:
+        address: { type: string }
+        address_display: { type: string }
+        name: { type: string }
+        is_function: { type: boolean }
+
+    TypeField:
+      type: object
+      properties:
+        name: { type: string }
+        type: { type: string }
+        offset: { type: integer }
+        size: { type: integer }
+
+    TypeEntry:
+      type: object
+      properties:
+        name: { type: string }
+        path: { type: string, examples: ["/types.h/__blkcnt_t"] }
+        kind: { type: string, examples: ["typedef", "struct", "union", "enum", "function"] }
+        size: { type: integer }
+        base_type: { type: string, description: Typedefs only. }
+        fields:
+          type: array
+          description: Structs and unions only.
+          items: { $ref: "#/components/schemas/TypeField" }
+        values:
+          type: object
+          description: Enums only, name to value.
+          additionalProperties: { type: integer }
+
+    MemBlock:
+      type: object
+      properties:
+        name: { type: string, examples: [".text"] }
+        start: { type: string }
+        start_display: { type: string }
+        end: { type: string }
+        size: { type: integer }
+        read: { type: boolean }
+        write: { type: boolean }
+        execute: { type: boolean }
+        volatile: { type: boolean }
+        initialized: { type: boolean, description: Uninitialised blocks (`.bss`) have no dump. }
+        overlay: { type: boolean }
+        type: { type: string }
+        source: { type: string, examples: ["Elf Loader"] }
+        file: { type: string, description: Dump file inside the artifact set. }
+        bytes_exported: { type: integer, description: Can be below `size` when the export cap was hit. }
+
+    Hexdump:
+      type: object
+      properties:
+        address: { type: string }
+        block: { type: string, description: Name of the block the bytes came from. }
+        length: { type: integer, description: Bytes actually returned; a read is truncated at the block end. }
+        base64: { type: string, format: byte }
+        hex: { type: string, description: "`hexdump -C` rendering of the same bytes." }

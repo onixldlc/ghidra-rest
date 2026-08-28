@@ -20,6 +20,8 @@
 //   xrefs.json            {address: {to: [...], from: [...]}}
 //   types.json            composites, enums, typedefs, function definitions
 //   memory/index.json     blocks, plus raw bytes of initialised ones
+//   disasm/<addr>.json      one instruction listing per function
+//   disasm/index.json       instruction counts per function
 //   decompiled/<addr>.json  one C listing per function
 //   decompiled/index.json   which functions got decompiled, and why not
 //
@@ -45,16 +47,20 @@ import ghidra.app.script.GhidraScript;
 import ghidra.framework.Application;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressIterator;
+import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.data.Composite;
 import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.DataTypeComponent;
 import ghidra.program.model.data.DataTypeManager;
 import ghidra.program.model.data.FunctionDefinition;
 import ghidra.program.model.data.TypeDef;
+import ghidra.program.model.listing.CodeUnit;
 import ghidra.program.model.listing.Data;
 import ghidra.program.model.listing.DataIterator;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
+import ghidra.program.model.listing.Instruction;
+import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.listing.Listing;
 import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.Program;
@@ -80,6 +86,8 @@ public class ExportJSON extends GhidraScript {
 	private int decompileTimeout = 60;
 	private long maxExportBytes = 256L * 1024 * 1024;
 	private int maxSymbols = 400000;
+	// per function; a runaway body should not write a gigabyte of JSON
+	private int maxDisasmInstructions = 200000;
 
 	private File outDir;
 
@@ -90,6 +98,7 @@ public class ExportJSON extends GhidraScript {
 	private int countExports;
 	private int countTypes;
 	private int countXrefs;
+	private long countInstructions;
 	private int countDecompiled;
 	private int countDecompileFailed;
 	private long bytesExported;
@@ -130,6 +139,7 @@ public class ExportJSON extends GhidraScript {
 		exportTypes(p);
 		exportXrefs(p);
 		exportMemory(p);
+		exportDisasm(p);
 		if (decompile) {
 			exportDecompiled(p);
 		}
@@ -689,6 +699,130 @@ public class ExportJSON extends GhidraScript {
 		}
 	}
 
+	// -------------------------------------------------------------- disasm
+
+	// One instruction listing per function, laid out like the decompiled set:
+	// disasm/<addr>.json plus an index. Nearly free next to decompilation --
+	// the instructions are already in the listing, this only serialises them.
+	private void exportDisasm(Program p) throws Exception {
+		mkdirs(new File(outDir, "disasm"));
+		Listing listing = p.getListing();
+
+		Writer idx = open("disasm/index.json");
+		idx.write("[");
+		boolean firstFn = true;
+		try {
+			FunctionIterator it = listing.getFunctions(true);
+			while (it.hasNext() && !monitor.isCancelled()) {
+				Function f = it.next();
+				if (f.isExternal()) {
+					// no body to disassemble; the thunk that calls it has one
+					continue;
+				}
+				String k = key(f.getEntryPoint());
+				AddressSetView body = f.getBody();
+
+				Writer fw = open("disasm/" + fileKey(k) + ".json");
+				fw.write("{");
+				field(fw, "address", k, true);
+				field(fw, "address_display", f.getEntryPoint().toString(), false);
+				field(fw, "name", f.getName(), false);
+				fw.write(",\"instructions\":[");
+				int n = 0;
+				try {
+					InstructionIterator iit = listing.getInstructions(body, true);
+					while (iit.hasNext() && !monitor.isCancelled() && n < maxDisasmInstructions) {
+						Instruction ins = iit.next();
+						if (n > 0) {
+							fw.write(",");
+						}
+						fw.write("{");
+						field(fw, "address", key(ins.getAddress()), true);
+						field(fw, "address_display", ins.getAddress().toString(), false);
+						field(fw, "bytes", hexBytes(ins), false);
+						field(fw, "mnemonic", ins.getMnemonicString(), false);
+						field(fw, "operands", operandText(ins), false);
+						field(fw, "text", ins.toString(), false);
+						field(fw, "comment", commentText(listing, ins), false);
+						num(fw, "length", ins.getLength(), false);
+						bool(fw, "is_call", ins.getFlowType().isCall(), false);
+						bool(fw, "is_jump", ins.getFlowType().isJump(), false);
+						bool(fw, "is_terminal", ins.getFlowType().isTerminal(), false);
+						field(fw, "flow", flowTarget(ins), false);
+						fw.write("}");
+						n++;
+						countInstructions++;
+					}
+				}
+				finally {
+					fw.write("]");
+					num(fw, "count", n, false);
+					bool(fw, "truncated", n >= maxDisasmInstructions, false);
+					fw.write("}");
+					fw.close();
+				}
+
+				if (!firstFn) {
+					idx.write(",");
+				}
+				firstFn = false;
+				idx.write("{");
+				field(idx, "address", k, true);
+				field(idx, "name", f.getName(), false);
+				num(idx, "count", n, false);
+				idx.write("}");
+			}
+		}
+		finally {
+			idx.write("]");
+			idx.close();
+		}
+	}
+
+	private static String hexBytes(Instruction ins) {
+		try {
+			byte[] b = ins.getBytes();
+			StringBuilder sb = new StringBuilder(b.length * 2);
+			for (int i = 0; i < b.length; i++) {
+				sb.append(String.format("%02x", b[i] & 0xff));
+			}
+			return sb.toString();
+		}
+		catch (Exception e) {
+			return "";
+		}
+	}
+
+	// Ghidra renders each operand separately; the joined form is what a listing
+	// window shows to the right of the mnemonic.
+	private static String operandText(Instruction ins) {
+		StringBuilder sb = new StringBuilder();
+		for (int i = 0; i < ins.getNumOperands(); i++) {
+			if (i > 0) {
+				sb.append(",");
+			}
+			sb.append(ins.getDefaultOperandRepresentation(i));
+		}
+		return sb.toString();
+	}
+
+	private static String commentText(Listing listing, Instruction ins) {
+		String c = listing.getComment(CodeUnit.EOL_COMMENT, ins.getAddress());
+		if (c == null) {
+			c = listing.getComment(CodeUnit.PRE_COMMENT, ins.getAddress());
+		}
+		return c == null ? "" : c;
+	}
+
+	// Where a call or jump goes, when the target is a single known address.
+	private static String flowTarget(Instruction ins) {
+		Address[] flows = ins.getFlows();
+		if (flows == null || flows.length != 1) {
+			return "";
+		}
+		return key(flows[0]);
+	}
+
 	// -------------------------------------------------------------- summary
 
 	private void exportSummary(Program p) throws Exception {
@@ -719,6 +853,7 @@ public class ExportJSON extends GhidraScript {
 		w.write(",\"exports\":" + countExports);
 		w.write(",\"types\":" + countTypes);
 		w.write(",\"xref_entries\":" + countXrefs);
+		w.write(",\"instructions\":" + countInstructions);
 		w.write(",\"decompiled\":" + countDecompiled);
 		w.write(",\"decompile_failed\":" + countDecompileFailed);
 		w.write("}");

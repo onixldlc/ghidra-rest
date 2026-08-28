@@ -230,7 +230,7 @@ Returned by every job endpoint and stored at `meta.json`.
 | `duration_ms` | int | Analysis wall time. |
 | `ghidra_version` | string | The Ghidra that produced this. |
 | `language`, `executable_format` | string | Lifted from `summary.json` when the job finishes. |
-| `counts` | object | `{"functions":575,"strings":510,"symbols":1833,"imports":122,"exports":18,"types":76,"xref_entries":1483,"decompiled":575,"decompile_failed":0}` |
+| `counts` | object | `{"functions":575,"strings":510,"symbols":1833,"imports":122,"exports":18,"types":76,"xref_entries":1483,"instructions":21609,"decompiled":575,"decompile_failed":0}` |
 
 Jobs that were `queued` or `running` when the process died come back as
 `failed` with `"interrupted by a server restart"` — half-written artifacts are
@@ -281,6 +281,7 @@ streamed rather than staged on disk. Requires `status: done`.
 ```
 artifacts/summary.json
 artifacts/functions.json
+artifacts/disasm/<addr>.json
 artifacts/decompiled/<addr>.json
 artifacts/memory/block-0.bin
 meta.json
@@ -385,6 +386,49 @@ walking every function.
 
 ```json
 {"address": "104030", "name": "__ctype_toupper_loc", "ok": true, "length": 203}
+```
+
+### `GET /v1/results/{id}/disasm/{addr}`
+
+The instruction listing for one function, as Ghidra's listing renders it.
+Written during the same export pass as everything else, so no second analysis
+run is involved.
+
+```json
+{
+  "address": "104310",
+  "address_display": "00104310",
+  "name": "memset",
+  "instructions": [
+    {"address": "104310", "address_display": "00104310", "bytes": "ff2582ac0300",
+     "mnemonic": "JMP", "operands": "qword ptr [->memset]", "text": "JMP qword ptr [->memset]",
+     "comment": "", "length": 6, "is_call": false, "is_jump": true,
+     "is_terminal": false, "flow": ""}
+  ],
+  "count": 1,
+  "truncated": false
+}
+```
+
+`flow` is the single known call/jump target, empty when the instruction has
+none or more than one. `truncated` means the per-function instruction cap
+(200000) was hit.
+
+`?format=text` renders the listing as plain text, one instruction per line:
+
+```
+00104310  ff2582ac0300  JMP qword ptr [->memset]
+```
+
+`404` if the address is external, a data address, or from a job analysed
+before this artifact existed.
+
+### `GET /v1/results/{id}/disasm`
+
+Instruction count per function, paged like the other lists.
+
+```json
+{"address": "104310", "name": "memset", "count": 1}
 ```
 
 ### `GET /v1/results/{id}/xrefs/{addr}`

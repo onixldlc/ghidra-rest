@@ -516,6 +516,68 @@ paths:
         "404": { $ref: "#/components/responses/ArtifactMissing" }
         "409": { $ref: "#/components/responses/NotDone" }
 
+  /v1/results/{id}/disasm:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/Limit"
+      - $ref: "#/components/parameters/Offset"
+      - $ref: "#/components/parameters/Query"
+    get:
+      tags: [results]
+      operationId: listDisasm
+      summary: Instruction count per function
+      description: Index over the disassembly artifacts, paged like the other lists.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/DisasmIndexEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/ArtifactMissing" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
+  /v1/results/{id}/disasm/{addr}:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/Addr"
+    get:
+      tags: [results]
+      operationId: getDisasm
+      summary: Instruction listing for one function
+      description: >-
+        Ghidra's listing for the function body, exported in the same pass as
+        every other artifact. `?format=text` renders one instruction per line
+        as text/plain instead of JSON.
+      parameters:
+        - name: format
+          in: query
+          required: false
+          description: "`text` for a plain-text listing; omit for JSON."
+          schema: { type: string, enum: [text] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DisasmListing" }
+            text/plain:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: External, a data address, or a job analysed before this artifact existed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409": { $ref: "#/components/responses/NotDone" }
+
   /v1/results/{id}/xrefs/{addr}:
     parameters:
       - $ref: "#/components/parameters/JobId"
@@ -1035,6 +1097,41 @@ components:
         name: { type: string }
         ok: { type: boolean }
         length: { type: integer, description: Characters of C. }
+
+    Instruction:
+      type: object
+      properties:
+        address: { type: string, description: Normalised key. }
+        address_display: { type: string }
+        bytes: { type: string, description: Raw encoding, lower-case hex. }
+        mnemonic: { type: string, examples: ["JMP"] }
+        operands: { type: string, description: Operands joined with commas, as the listing renders them. }
+        text: { type: string, description: Mnemonic and operands together. }
+        comment: { type: string, description: EOL comment, falling back to the pre comment. }
+        length: { type: integer, description: Bytes of encoding. }
+        is_call: { type: boolean }
+        is_jump: { type: boolean }
+        is_terminal: { type: boolean }
+        flow: { type: string, description: Single known call/jump target; empty when there is none or several. }
+
+    DisasmListing:
+      type: object
+      properties:
+        address: { type: string }
+        address_display: { type: string }
+        name: { type: string }
+        instructions:
+          type: array
+          items: { $ref: "#/components/schemas/Instruction" }
+        count: { type: integer }
+        truncated: { type: boolean, description: The per-function instruction cap was hit. }
+
+    DisasmIndexEntry:
+      type: object
+      properties:
+        address: { type: string }
+        name: { type: string }
+        count: { type: integer }
 
     Xref:
       type: object

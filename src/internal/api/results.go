@@ -127,6 +127,53 @@ func (s *Server) handleDecompile(w http.ResponseWriter, r *http.Request) {
 	w.Write(b)
 }
 
+func (s *Server) handleDisasmIndex(w http.ResponseWriter, r *http.Request) {
+	s.handleArray("disasm/index.json")(w, r)
+}
+
+// handleDisasm serves one function's instruction listing. `?format=text`
+// renders it the way a listing window would, which is what a terminal client
+// wants and what the web UI falls back to.
+func (s *Server) handleDisasm(w http.ResponseWriter, r *http.Request) {
+	job, ok := s.resultJob(w, r)
+	if !ok {
+		return
+	}
+	addr := jobs.NormAddr(r.PathValue("addr"))
+	file := strings.NewReplacer(":", "_", "/", "_").Replace(addr) + ".json"
+	b, err := os.ReadFile(filepath.Join(s.mgr.ArtifactsDir(job.ID), "disasm", file))
+	if err != nil {
+		writeError(w, http.StatusNotFound,
+			"no disassembly for "+addr+"; it may be external, a data address, or from a job analysed before disasm export existed")
+		return
+	}
+	if r.URL.Query().Get("format") == "text" {
+		var d struct {
+			Instructions []struct {
+				AddressDisplay string `json:"address_display"`
+				Bytes          string `json:"bytes"`
+				Text           string `json:"text"`
+				Comment        string `json:"comment"`
+			} `json:"instructions"`
+		}
+		if err := json.Unmarshal(b, &d); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		for _, in := range d.Instructions {
+			line := in.AddressDisplay + "  " + in.Bytes + "  " + in.Text
+			if in.Comment != "" {
+				line += "  ; " + in.Comment
+			}
+			io.WriteString(w, line+"\n")
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Write(b)
+}
+
 func (s *Server) handleXrefs(w http.ResponseWriter, r *http.Request) {
 	job, ok := s.resultJob(w, r)
 	if !ok {

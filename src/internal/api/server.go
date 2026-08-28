@@ -60,6 +60,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/results/{id}/function/{addr}", s.handleFunction)
 	mux.HandleFunc("GET /v1/results/{id}/function/{addr}/decompile", s.handleDecompile)
 	mux.HandleFunc("GET /v1/results/{id}/decompiled", s.handleDecompiledIndex)
+	mux.HandleFunc("GET /v1/results/{id}/disasm", s.handleDisasmIndex)
+	mux.HandleFunc("GET /v1/results/{id}/disasm/{addr}", s.handleDisasm)
 	mux.HandleFunc("GET /v1/results/{id}/xrefs/{addr}", s.handleXrefs)
 	mux.HandleFunc("GET /v1/results/{id}/hexdump/{addr}", s.handleHexdump)
 

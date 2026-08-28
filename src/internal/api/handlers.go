@@ -81,6 +81,8 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 			"GET /v1/results/{id}/function/{addr}",
 			"GET /v1/results/{id}/function/{addr}/decompile",
 			"GET /v1/results/{id}/decompiled",
+			"GET /v1/results/{id}/disasm",
+			"GET /v1/results/{id}/disasm/{addr}",
 			"GET /v1/results/{id}/xrefs/{addr}",
 			"GET /v1/results/{id}/strings",
 			"GET /v1/results/{id}/symbols",

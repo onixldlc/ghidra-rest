@@ -67,6 +67,14 @@ docker compose up -d
 The image is large (Ghidra plus a JDK). That is inherent, not sloppiness: the
 analyzer, its sleigh specs and every processor module have to be there.
 
+`/function/{addr}/decompile` returns the C in `c` and, in `lines`, which
+instructions produced each line of it. That mapping is read off the
+decompiler's markup tree -- every token remembers the address it came from --
+and is the same data Ghidra's own Decompiler window uses to highlight the
+matching instructions in the Listing. It is sparse: declarations and braces map
+to nothing. Jobs analysed before this was exported have an empty `lines`;
+re-submit with `force=1` to get one.
+
 ## API
 
 Full reference — every endpoint, request field and response body — is in

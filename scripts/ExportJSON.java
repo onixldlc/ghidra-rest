@@ -38,11 +38,16 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.TreeSet;
 
+import ghidra.app.decompiler.ClangLine;
+import ghidra.app.decompiler.ClangToken;
+import ghidra.app.decompiler.ClangTokenGroup;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.decompiler.DecompiledFunction;
+import ghidra.app.decompiler.component.DecompilerUtils;
 import ghidra.app.script.GhidraScript;
 import ghidra.framework.Application;
 import ghidra.program.model.address.Address;
@@ -642,11 +647,13 @@ public class ExportJSON extends GhidraScript {
 				String c = "";
 				String sig = "";
 				String err = "";
+				String lines = "[]";
 				if (ok) {
 					DecompiledFunction df = res.getDecompiledFunction();
 					if (df != null) {
 						c = df.getC();
 						sig = df.getSignature();
+						lines = lineMap(res);
 					}
 					else {
 						ok = false;
@@ -666,6 +673,7 @@ public class ExportJSON extends GhidraScript {
 				bool(fw, "ok", ok, false);
 				field(fw, "error", err, false);
 				field(fw, "c", c, false);
+				fw.write(",\"lines\":" + lines);
 				fw.write("}");
 				fw.close();
 
@@ -697,6 +705,50 @@ public class ExportJSON extends GhidraScript {
 			idx.write("]");
 			idx.close();
 		}
+	}
+
+	// Which instructions produced each line of C. Ghidra keeps this on the
+	// markup tree -- every ClangToken remembers the address it came from -- and
+	// it is what the Decompiler window uses to highlight the matching
+	// instructions in the Listing. getC() throws it away, so read it off the
+	// markup instead and ship it alongside the text. Lines that are pure
+	// punctuation map to nothing and are left out.
+	private String lineMap(DecompileResults res) {
+		ClangTokenGroup markup = res == null ? null : res.getCCodeMarkup();
+		if (markup == null) {
+			return "[]";
+		}
+		StringBuilder b = new StringBuilder(4096);
+		b.append("[");
+		boolean firstLine = true;
+		for (ClangLine line : DecompilerUtils.toLines(markup)) {
+			TreeSet<Address> addrs = new TreeSet<Address>();
+			for (ClangToken t : line.getAllTokens()) {
+				Address a = t.getMinAddress();
+				if (a != null) {
+					addrs.add(a);
+				}
+			}
+			if (addrs.isEmpty()) {
+				continue;
+			}
+			if (!firstLine) {
+				b.append(",");
+			}
+			firstLine = false;
+			b.append("{\"n\":").append(line.getLineNumber()).append(",\"a\":[");
+			boolean firstAddr = true;
+			for (Address a : addrs) {
+				if (!firstAddr) {
+					b.append(",");
+				}
+				firstAddr = false;
+				b.append("\"").append(esc(key(a))).append("\"");
+			}
+			b.append("]}");
+		}
+		b.append("]");
+		return b.toString();
 	}
 
 	// -------------------------------------------------------------- disasm

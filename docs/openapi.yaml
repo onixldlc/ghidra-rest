@@ -1089,6 +1089,24 @@ components:
         ok: { type: boolean }
         error: { type: string }
         c: { type: string, description: The decompiled listing. }
+        lines:
+          type: array
+          description: |
+            Which instructions produced each line of `c`, read off the
+            decompiler's markup tree -- the same mapping the Ghidra GUI uses to
+            highlight the matching instructions in the Listing. Lines that are
+            pure punctuation are omitted, so this is sparse. Empty for analyses
+            that ran before the exporter recorded it.
+          items: { $ref: "#/components/schemas/DecompiledLine" }
+
+    DecompiledLine:
+      type: object
+      properties:
+        n: { type: integer, description: 1-based line number into `c`. }
+        a:
+          type: array
+          description: Instruction addresses, ascending.
+          items: { type: string }
 
     DecompiledIndexEntry:
       type: object

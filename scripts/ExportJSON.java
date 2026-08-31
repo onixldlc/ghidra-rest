@@ -104,6 +104,7 @@ public class ExportJSON extends GhidraScript {
 	private int countTypes;
 	private int countXrefs;
 	private long countInstructions;
+	private int countLocalFunctions;
 	private int countDecompiled;
 	private int countDecompileFailed;
 	private long bytesExported;
@@ -160,9 +161,16 @@ public class ExportJSON extends GhidraScript {
 			" strings=" + countStrings + " symbols=" + countSymbols);
 	}
 
+	// Progress markers. Nothing reads these but a human and guttex's loading
+	// screen, so they are plain and prefixed: one grep, no format to parse.
+	private void stage(String name) {
+		println("ExportJSON: stage " + name);
+	}
+
 	// ---------------------------------------------------------------- funcs
 
 	private void exportFunctions(Program p) throws Exception {
+		stage("functions");
 		Listing listing = p.getListing();
 		Writer w = open("functions.json");
 		w.write("[");
@@ -175,6 +183,9 @@ public class ExportJSON extends GhidraScript {
 			}
 			first = false;
 			countFunctions++;
+			if (!f.isExternal()) {
+				countLocalFunctions++;
+			}
 			writeFunction(w, f);
 			if (countFunctions % 500 == 0) {
 				println("ExportJSON: functions " + countFunctions);
@@ -182,6 +193,8 @@ public class ExportJSON extends GhidraScript {
 		}
 		w.write("]");
 		w.close();
+		// The periodic line counts in 500s, so it is a floor. This is the total.
+		println("ExportJSON: functions total=" + countFunctions);
 	}
 
 	private void writeFunction(Writer w, Function f) throws Exception {
@@ -245,6 +258,7 @@ public class ExportJSON extends GhidraScript {
 	// -------------------------------------------------------------- strings
 
 	private void exportStrings(Program p) throws Exception {
+		stage("strings");
 		ReferenceManager rm = p.getReferenceManager();
 		Writer w = open("strings.json");
 		w.write("[");
@@ -280,6 +294,7 @@ public class ExportJSON extends GhidraScript {
 	// -------------------------------------------------------------- symbols
 
 	private void exportSymbols(Program p) throws Exception {
+		stage("symbols");
 		SymbolTable st = p.getSymbolTable();
 		Writer w = open("symbols.json");
 		w.write("[");
@@ -313,6 +328,7 @@ public class ExportJSON extends GhidraScript {
 	// -------------------------------------------------------------- imports
 
 	private void exportImports(Program p) throws Exception {
+		stage("imports");
 		ExternalManager em = p.getExternalManager();
 		Writer w = open("imports.json");
 		w.write("[");
@@ -348,6 +364,7 @@ public class ExportJSON extends GhidraScript {
 	// -------------------------------------------------------------- exports
 
 	private void exportExports(Program p) throws Exception {
+		stage("exports");
 		SymbolTable st = p.getSymbolTable();
 		Writer w = open("exports.json");
 		w.write("[");
@@ -375,6 +392,7 @@ public class ExportJSON extends GhidraScript {
 	// ---------------------------------------------------------------- types
 
 	private void exportTypes(Program p) throws Exception {
+		stage("types");
 		DataTypeManager dtm = p.getDataTypeManager();
 		Writer w = open("types.json");
 		w.write("[");
@@ -465,6 +483,7 @@ public class ExportJSON extends GhidraScript {
 	// ---------------------------------------------------------------- xrefs
 
 	private void exportXrefs(Program p) throws Exception {
+		stage("xrefs");
 		ReferenceManager rm = p.getReferenceManager();
 		Writer w = open("xrefs.json");
 		w.write("{");
@@ -538,6 +557,7 @@ public class ExportJSON extends GhidraScript {
 	// --------------------------------------------------------------- memory
 
 	private void exportMemory(Program p) throws Exception {
+		stage("memory");
 		File memDir = new File(outDir, "memory");
 		mkdirs(memDir);
 		Memory mem = p.getMemory();
@@ -608,6 +628,7 @@ public class ExportJSON extends GhidraScript {
 	// ----------------------------------------------------------- decompiled
 
 	private void exportDecompiled(Program p) throws Exception {
+		stage("decompiled");
 		File dir = new File(outDir, "decompiled");
 		mkdirs(dir);
 
@@ -629,6 +650,9 @@ public class ExportJSON extends GhidraScript {
 		idx.write("[");
 		boolean first = true;
 		int seen = 0;
+		// Externals are skipped below and the cap stops the walk early, so the
+		// number worth reporting is neither the function count nor the cap.
+		println("ExportJSON: decompiling 0/" + Math.min(countLocalFunctions, maxDecompileFuncs));
 		try {
 			FunctionIterator it = p.getListing().getFunctions(true);
 			while (it.hasNext() && !monitor.isCancelled()) {
@@ -757,6 +781,7 @@ public class ExportJSON extends GhidraScript {
 	// disasm/<addr>.json plus an index. Nearly free next to decompilation --
 	// the instructions are already in the listing, this only serialises them.
 	private void exportDisasm(Program p) throws Exception {
+		stage("disasm");
 		mkdirs(new File(outDir, "disasm"));
 		Listing listing = p.getListing();
 
@@ -878,6 +903,7 @@ public class ExportJSON extends GhidraScript {
 	// -------------------------------------------------------------- summary
 
 	private void exportSummary(Program p) throws Exception {
+		stage("summary");
 		Writer w = open("summary.json");
 		w.write("{");
 		field(w, "name", p.getName(), true);

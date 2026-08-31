@@ -65,6 +65,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/results/{id}/xrefs/{addr}", s.handleXrefs)
 	mux.HandleFunc("GET /v1/results/{id}/hexdump/{addr}", s.handleHexdump)
 
+	// The only writes into Ghidra. PUT because setting a prototype is idempotent:
+	// sending the same one twice must not stack up two edits.
+	mux.HandleFunc("GET /v1/results/{id}/signatures", s.handleSignatures)
+	mux.HandleFunc("PUT /v1/results/{id}/function/{addr}/signature", s.handleSetSignature)
+	mux.HandleFunc("DELETE /v1/results/{id}/function/{addr}/signature", s.handleClearSignature)
+
 	mux.HandleFunc("/", s.handleNotFound)
 
 	var h http.Handler = mux
@@ -154,7 +160,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 		if s.cfg.CORSOrigin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", s.cfg.CORSOrigin)
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
 				return

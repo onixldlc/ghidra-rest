@@ -540,6 +540,121 @@ rather than running into the next one, which may not be contiguous.
 
 ---
 
+## Signatures
+
+The only endpoints that write. Everything above reads what an analysis left on
+disk; these re-open the job's Ghidra project with `-noanalysis`, apply a
+prototype and re-decompile the function and its callers. Expect **tens of
+seconds** per call, and set your client timeout accordingly.
+
+They need the job's Ghidra project, i.e. `GHIDRAREST_KEEP_PROJECT` (now on by
+default) at the time the binary was analysed. Without it the answer is `409`.
+
+Full rationale, prototype syntax and worked examples:
+[SIGNATURES.md](SIGNATURES.md).
+
+### `GET /v1/results/{id}/signatures`
+
+```json
+{
+  "job": "b8e1096aef55db4bfeb3404c",
+  "editable": true,
+  "count": 1,
+  "signature": [
+    {
+      "address": "10135e",
+      "prototype": "long make_secret(byte * secret)",
+      "calling_convention": "__stdcall",
+      "original": "undefined make_secret(void)",
+      "original_calling_convention": "unknown",
+      "at": "2026-08-31T09:14:02Z"
+    }
+  ],
+  "calling_conventions": ["MSABI", "__stdcall", "__thiscall", "processEntry", "syscall"]
+}
+```
+
+| field | meaning |
+| --- | --- |
+| `editable` | `false` when this job kept no Ghidra project — nothing here can be retyped |
+| `signature[].original` | what the analyser said before the first edit; a reset re-applies it |
+| `calling_conventions` | the names this program's compiler spec defines, and the only ones `PUT` accepts. Empty on analyses predating the field that have never been edited |
+
+### `PUT /v1/results/{id}/function/{addr}/signature`
+
+```json
+{ "prototype": "long make_secret(byte *secret)", "calling_convention": "__stdcall" }
+```
+
+`prototype` is C, the same text Ghidra's *Edit Function Signature* takes. The
+function name in it is **ignored** — renaming is a separate concern.
+
+A `*` written against that name (`long *f(void)`) binds to the declarator in
+Ghidra's parser, so discarding the name would discard the pointer with it. The
+server moves such stars onto the return type before parsing: `long *f(void)`
+and `long * f(void)` apply identically, both as `long *`. A function-pointer
+return (`void (*fp)(int)`) is left as written and is rejected by the parser.
+
+`calling_convention` is optional and deliberately not part of the prototype:
+Ghidra's C parser accepts `__cdecl` in the signature text and then discards it,
+leaving locked parameter storage with an `unknown` convention — the state
+behind the decompiler's `Unknown calling convention ... parameter storage is
+locked` warning.
+
+PUT rather than POST: setting a prototype is idempotent.
+
+```json
+{
+  "job": "b8e1096aef55db4bfeb3404c",
+  "address": "10135e",
+  "ok": true,
+  "before": "undefined make_secret(void)",
+  "prototype": "long make_secret(byte * secret)",
+  "calling_convention": "__stdcall",
+  "original": "undefined make_secret(void)",
+  "set_at": "2026-08-31T09:14:02Z",
+  "function": { "address": "10135e", "name": "make_secret", "return_type": "long", "...": "" },
+  "redecompiled": ["10135e", "1013d0"],
+  "duration_ms": 21344
+}
+```
+
+`redecompiled` lists everything whose `/decompile` response just changed: the
+retyped function plus every caller, because a caller's C names the callee's
+parameters and consumes its return value.
+
+| status | meaning |
+| --- | --- |
+| `400` | body is not `{"prototype": "..."}` |
+| `404` | no function at that address |
+| `409` | job is not `done`, or it kept no Ghidra project |
+| `422` | the prototype did not parse, or the convention is not one this program defines |
+| `500` | the headless run failed; the message carries the tail of its output |
+
+`422` carries the parser's own words and applies nothing — the transaction is
+rolled back whole:
+
+```json
+{
+  "error": "this program has no calling convention \"__cdecl\"; it accepts MSABI, __stdcall, __thiscall, processEntry, syscall",
+  "status": 422,
+  "address": "10135e",
+  "before": "long make_secret(byte * secret)",
+  "duration_ms": 19870
+}
+```
+
+### `DELETE /v1/results/{id}/function/{addr}/signature`
+
+Re-applies the recorded `original` and drops the ledger row. Same response
+shape as `PUT`; `404` if that address was never edited.
+
+This is a restore, not an undo — Ghidra has no undo across processes. The
+types come back; the restored signature is stored as `USER_DEFINED` where the
+original may have been an analyser guess.
+
+---
+
 ## End to end
 
 ```sh

@@ -88,11 +88,17 @@ Editor, or point a generator at it for a client). The short version:
 | Poll | `GET /v1/jobs/{id}` until `status` is `done` |
 | Read | `GET /v1/results/{id}/{summary,functions,strings,symbols,imports,exports,types,memory}` |
 | Dig | `/function/{addr}`, `/function/{addr}/decompile`, `/xrefs/{addr}`, `/hexdump/{addr}` |
+| Retype | `PUT`/`DELETE /v1/results/{id}/function/{addr}/signature`, `GET /v1/results/{id}/signatures` |
 | Grab it all | `GET /v1/jobs/{id}/export` -> one zip |
 
 Lists take `?limit=`, `?offset=` and `?q=`. `GET /v1/capabilities` reports the
 live limits and endpoint list from the running server, which is the only
 description of the API that cannot go stale.
+
+Everything above reads what an analysis left on disk. The one exception is the
+signature row: those three endpoints write back into Ghidra by re-opening the
+job's project headless, which is a different enough animal to have its own
+document — **[docs/SIGNATURES.md](docs/SIGNATURES.md)**.
 
 ## Running the release binary
 
@@ -173,7 +179,8 @@ restart policy, a fatal config error is just a crash loop.
 | `GHIDRAREST_API_TOKEN` | empty | Bearer token (or `X-API-Key`). Empty means open. |
 | `GHIDRAREST_CORS_ORIGIN` | empty | Set to enable CORS for one origin. |
 | `GHIDRAREST_RETENTION` | unset | Delete finished jobs older than this. Unset keeps them. |
-| `GHIDRAREST_KEEP_PROJECT` | `false` | Keep the Ghidra project dir per job. Large; debugging only. |
+| `GHIDRAREST_KEEP_PROJECT` | `true` | Keep the Ghidra project dir per job. This is what signature editing re-opens; turning it off saves roughly an analysis database per job and gives up retyping. |
+| `GHIDRAREST_SIGNATURE_TIMEOUT` | `10m` | Bounds one apply-signature run. Far below the analysis timeout on purpose: that run is `-noanalysis`. |
 | `GHIDRAREST_MAX_CPU` | 0 | Passed to `analyzeHeadless -max-cpu` when > 0. |
 | `GHIDRAREST_VERBOSE` | `false` | Log every request, not just 4xx/5xx. |
 
@@ -201,21 +208,26 @@ peak. The defaults suit a 4-8 GB host.
 src/main.go                        startup, signals, graceful shutdown, -healthcheck/-version
 src/internal/config/config.go      environment -> Config
 src/internal/jobs/jobs.go          job records, queue, worker pool, on-disk store
-src/internal/jobs/ghidra.go        the analyzeHeadless invocation
+src/internal/jobs/ghidra.go        the analyzeHeadless invocations
+src/internal/jobs/signature.go     retyping: the override ledger and the apply run
 src/internal/jobs/artifacts.go     artifact parsing, paging, address normalisation, hexdump
 src/internal/jobs/proc_unix.go     process-group kill, so cancelling kills the JVM too
 src/internal/jobs/proc_windows.go  the portable fallback
 src/internal/api/server.go         routes, middleware (auth, CORS, logging, recovery)
 src/internal/api/handlers.go       service info, submission, job lifecycle
 src/internal/api/results.go        result endpoints over the artifact files
+src/internal/api/signature.go      the only endpoints that write back into Ghidra
 src/internal/api/export.go         zip export of a job's artifacts
 scripts/ExportJSON.java            the Ghidra post-script that writes every artifact
-docs/                              API.md (prose), openapi.yaml (OpenAPI 3.1)
+scripts/ApplySignature.java        applies prototypes, then re-exports just what changed
+docs/                              API.md (prose), openapi.yaml (OpenAPI 3.1), SIGNATURES.md,
+                                   TYPES_DESIGN.md (proposal, not implemented)
 docker/                            Dockerfile, entrypoint.sh, verify.sh, warmup.sh, build-dist.sh
 ```
 
 `internal/jobs` knows nothing about HTTP and `internal/api` never runs Ghidra:
-the API layer only reads files that a finished job left behind. `main` is the
+the API layer only reads files that a finished job left behind, and hands the
+one operation that cannot work that way — retyping — back to `internal/jobs`. `main` is the
 only package outside `internal`, which keeps the import graph one-directional
 and lets `go vet ./...` catch a layering mistake as a compile error.
 
@@ -228,6 +240,7 @@ On disk, per job:
 /data/jobs/<id>/artifacts/         summary, functions, strings, ...
 /data/jobs/<id>/artifacts/decompiled/<addr>.json
 /data/jobs/<id>/artifacts/memory/block-N.bin
+/data/jobs/<id>/signatures.json    prototypes edited since analysis, and what they replaced
 /data/jobs/<id>/project/           Ghidra project, deleted unless KEEP_PROJECT
 ```
 

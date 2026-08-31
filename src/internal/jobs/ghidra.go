@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -133,6 +134,40 @@ func (m *Manager) runHeadless(ctx context.Context, job *Job) error {
 		fmt.Fprintf(logf, "\n# note: exporter completed but analyzeHeadless exited: %v\n", runErr)
 	}
 	return nil
+}
+
+// runHeadlessTool runs analyzeHeadless for something other than a fresh
+// analysis -- today that is only ApplySignature. The transcript is appended to
+// the job's own headless.log rather than a second file: a retype is part of
+// what happened to that job, and GET /v1/jobs/{id}/log should show it.
+// The combined output is returned as well, because an error message that says
+// only "exit 1" is useless to whoever called the endpoint.
+func (m *Manager) runHeadlessTool(ctx context.Context, job *Job, bin string, args []string, what string) (string, error) {
+	logf, err := os.OpenFile(m.LogPath(job.ID), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return "", err
+	}
+	defer logf.Close()
+	fmt.Fprintf(logf, "\n# %s %s: analyzeHeadless %s\n\n", time.Now().UTC().Format(time.RFC3339), what,
+		strings.Join(args, " "))
+
+	var buf strings.Builder
+	sink := io.MultiWriter(logf, &buf)
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Dir = m.jobDir(job.ID)
+	cmd.Stdout = sink
+	cmd.Stderr = sink
+	cmd.Env = append(os.Environ(),
+		"MAXMEM="+m.cfg.JavaMaxMem,
+		"GHIDRA_HOME="+m.cfg.GhidraHome,
+	)
+	setProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	cmd.WaitDelay = 10 * time.Second
+
+	err = cmd.Run()
+	return buf.String(), err
 }
 
 // LogTail returns the last n bytes of a job's headless log, for error strings

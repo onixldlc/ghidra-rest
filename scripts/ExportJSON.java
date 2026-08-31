@@ -910,6 +910,20 @@ public class ExportJSON extends GhidraScript {
 		w.write(",\"decompile_failed\":" + countDecompileFailed);
 		w.write("}");
 
+		// The calling conventions this program's compiler spec defines. Only
+		// these names are accepted when a signature is edited later, and there is
+		// no way to ask for them without a Ghidra process, so they ship here.
+		w.write(",\"calling_conventions\":[");
+		boolean firstCC = true;
+		for (String cc : p.getFunctionManager().getCallingConventionNames()) {
+			if (!firstCC) {
+				w.write(",");
+			}
+			firstCC = false;
+			w.write("\"" + esc(cc) + "\"");
+		}
+		w.write("]");
+
 		w.write(",\"entry_points\":[");
 		List<String> eps = new ArrayList<String>();
 		AddressIterator it = p.getSymbolTable().getExternalEntryPointIterator();

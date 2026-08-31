@@ -33,9 +33,19 @@ type Config struct {
 	DecompileMaxFuncs int
 	MaxExportBytes    int64
 
-	JavaMaxMem  string
-	MaxCPU      int
+	JavaMaxMem string
+	MaxCPU     int
+
+	// KeepProject keeps <job>/project/ after analysis. It defaults on because
+	// it is what signature editing re-opens: without it a finished job can
+	// still be read, but nothing about it can be changed. Turning it off saves
+	// roughly the size of the analysis database per job and gives up retyping.
 	KeepProject bool
+
+	// SignatureTimeout bounds one apply-signature pass. It is far shorter than
+	// AnalysisTimeout on purpose: the pass runs with -noanalysis, so anything
+	// past a JVM start plus a handful of decompilations is a hang.
+	SignatureTimeout time.Duration
 
 	Retention time.Duration
 
@@ -126,7 +136,9 @@ func Load() *Config {
 
 		JavaMaxMem:  Env("GHIDRAREST_JAVA_MAX_MEM", "2G"),
 		MaxCPU:      int(envInt("GHIDRAREST_MAX_CPU", 0)),
-		KeepProject: envBool("GHIDRAREST_KEEP_PROJECT", false),
+		KeepProject: envBool("GHIDRAREST_KEEP_PROJECT", true),
+
+		SignatureTimeout: envDur("GHIDRAREST_SIGNATURE_TIMEOUT", 10*time.Minute),
 
 		Retention: envDur("GHIDRAREST_RETENTION", 0),
 

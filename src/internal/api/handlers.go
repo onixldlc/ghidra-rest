@@ -56,11 +56,15 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 			"max_export_bytes":      s.cfg.MaxExportBytes,
 			"max_page_size":         s.cfg.MaxPageSize,
 			"max_hexdump_bytes":     s.cfg.MaxHexdumpBytes,
+			"signature_timeout_sec": int(s.cfg.SignatureTimeout.Seconds()),
 		},
 		"features": []string{
 			"multipart-upload", "base64-upload", "sha256-dedup", "cancel",
 			"decompilation", "xrefs", "strings", "symbols", "imports", "exports",
 			"types", "memory-hexdump", "artifact-zip-export",
+			// present only when new jobs keep their project; without it a
+			// client should not offer a retype it cannot perform
+			signatureFeature(s.cfg.KeepProject),
 		},
 		"endpoints": []string{
 			"GET /healthz",
@@ -91,8 +95,20 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 			"GET /v1/results/{id}/types",
 			"GET /v1/results/{id}/memory",
 			"GET /v1/results/{id}/hexdump/{addr}",
+			"GET /v1/results/{id}/signatures",
+			"PUT /v1/results/{id}/function/{addr}/signature",
+			"DELETE /v1/results/{id}/function/{addr}/signature",
 		},
 	})
+}
+
+// signatureFeature keeps the features list a list of strings while still
+// letting it say "not here". An empty entry is filtered by the caller.
+func signatureFeature(keep bool) string {
+	if keep {
+		return "signature-edit"
+	}
+	return "signature-edit-disabled"
 }
 
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {

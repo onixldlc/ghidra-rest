@@ -3,9 +3,11 @@
 # export script over it.
 #
 # Two reasons this runs in the image build rather than in CI only:
-#   1. ExportJSON.java is compiled by Ghidra at first use, against whatever
-#      API this Ghidra release ships. A compile error here fails the build
-#      instead of failing the first user's job.
+#   1. The scripts are compiled by Ghidra at first use, against whatever API
+#      this Ghidra release ships. A compile error here fails the build instead
+#      of failing the first user's job. ApplySignature.java is run too, with an
+#      empty ops file: no op is applied, but the class is compiled and cached,
+#      and a signature apply is not the place to discover it does not build.
 #   2. The compiled script is cached under $HOME, which is baked into the
 #      image (not the /data volume), so it survives into every container.
 set -eu
@@ -17,6 +19,10 @@ TARGET="${1:-/bin/date}"
 
 mkdir -p "${WORK}/proj" "${WORK}/out"
 
+# Empty on purpose: ApplySignature applies nothing and rewrites functions.json.
+: > "${WORK}/ops.tsv"
+: > "${WORK}/result.tsv"
+
 echo "warmup: importing ${TARGET} with $(basename "${GHIDRA_HOME}")"
 
 MAXMEM="${GHIDRAREST_JAVA_MAX_MEM:-2G}" \
@@ -25,6 +31,7 @@ MAXMEM="${GHIDRAREST_JAVA_MAX_MEM:-2G}" \
 	-import "${TARGET}" \
 	-scriptPath "${SCRIPT_DIR}" \
 	-postScript ExportJSON.java "${WORK}/out" \
+	-postScript ApplySignature.java "${WORK}/out" "${WORK}/ops.tsv" "${WORK}/result.tsv" 30 \
 	-analysisTimeoutPerFile 600 \
 	-deleteProject
 

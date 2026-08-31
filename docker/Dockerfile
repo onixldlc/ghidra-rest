@@ -103,6 +103,8 @@ COPY --from=build /out/ghidrarest /usr/local/bin/ghidrarest
 
 COPY scripts/ExportJSON.java /opt/ghidra-rest/scripts/ExportJSON.java
 
+COPY scripts/ApplySignature.java /opt/ghidra-rest/scripts/ApplySignature.java
+
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 COPY docker/verify.sh /usr/local/bin/verify.sh

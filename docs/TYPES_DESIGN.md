@@ -74,6 +74,14 @@ Rewrites `types.json`, `functions.json` (signatures re-render) and
 
 ## Open questions
 
+- **A new script is not shipped until the Dockerfile copies it.** `ApplySignature.java`
+  was written, tested and pushed, and the published image never contained it:
+  `docker/Dockerfile` copies scripts by name, so every apply failed on the
+  `apply script not found` check while the routes answered normally. Adding
+  `ApplyTypes.java` means adding a `COPY` line *and* a `-postScript` in
+  `docker/warmup.sh` with an empty ops file, so a Java error fails the build
+  instead of the first user request.
+
 - **Struct members go through the same parser that just bit us.** A member
   declaration (`char *name;`) is a declarator too. `ApplySignature.java` needed
   `detachReturnStars()` because a `*` adjacent to the declared name bound to the

@@ -101,9 +101,11 @@ COPY --from=ghidra /opt/ghidra /opt/ghidra
 
 COPY --from=build /out/ghidrarest /usr/local/bin/ghidrarest
 
-COPY scripts/ExportJSON.java /opt/ghidra-rest/scripts/ExportJSON.java
-
-COPY scripts/ApplySignature.java /opt/ghidra-rest/scripts/ApplySignature.java
+# The whole directory, not a line per file. Ghidra compiles everything under
+# -scriptPath as one bundle, so the tasks and the helpers they share have to
+# arrive together -- and a new task must not need a Dockerfile edit to reach
+# the image. scripts/RestRegistry.java is the list of what is in here.
+COPY scripts/ /opt/ghidra-rest/scripts/
 
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 

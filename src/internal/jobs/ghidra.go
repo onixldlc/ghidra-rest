@@ -40,9 +40,9 @@ func (m *Manager) runHeadless(ctx context.Context, job *Job) error {
 	if _, err := os.Stat(bin); err != nil {
 		return fmt.Errorf("analyzeHeadless not found under %s: %w", m.cfg.GhidraHome, err)
 	}
-	script := filepath.Join(m.cfg.ScriptDir, "ExportJSON.java")
+	script := filepath.Join(m.cfg.ScriptDir, "RestScript.java")
 	if _, err := os.Stat(script); err != nil {
-		return fmt.Errorf("export script not found: %w", err)
+		return fmt.Errorf("task script not found: %w", err)
 	}
 
 	artDir := m.ArtifactsDir(job.ID)
@@ -65,7 +65,10 @@ func (m *Manager) runHeadless(ctx context.Context, job *Job) error {
 		projDir, "ghidrarest",
 		"-import", m.InputPath(job),
 		"-scriptPath", m.cfg.ScriptDir,
-		"-postScript", "ExportJSON.java",
+		// One entry script for every task; scripts/RestRegistry.java is the
+		// list of names it accepts.
+		"-postScript", "RestScript.java",
+		"export",
 		artDir,
 		strconv.FormatBool(job.Options.Decompile),
 		strconv.Itoa(job.Options.DecompileMaxFuncs),

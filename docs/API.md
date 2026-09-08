@@ -542,7 +542,8 @@ rather than running into the next one, which may not be contiguous.
 
 ## Signatures
 
-The only endpoints that write. Everything above reads what an analysis left on
+One of the two groups of endpoints that write (the other is
+[Patches](#patches)). Everything above reads what an analysis left on
 disk; these re-open the job's Ghidra project with `-noanalysis`, apply a
 prototype and re-decompile the function and its callers. Expect **tens of
 seconds** per call, and set your client timeout accordingly.
@@ -652,6 +653,102 @@ shape as `PUT`; `404` if that address was never edited.
 This is a restore, not an undo — Ghidra has no undo across processes. The
 types come back; the restored signature is stored as `USER_DEFINED` where the
 original may have been an analyser guess.
+
+---
+
+## Patches
+
+The other endpoints that write, and the reason they exist: the obvious way to
+make Ghidra look at patched bytes is to submit the patched file as a new job,
+which on a 239&nbsp;MiB binary costs a second full copy on disk and a full
+re-analysis for the sake of four changed bytes. These write the bytes into the
+program the job already has instead.
+
+One call re-opens the job's kept project with `-noanalysis`, clears the code
+units the patch covers, writes the bytes, re-disassembles the function they
+land in and re-decompiles it and its callers. Expect **tens of seconds**, the
+same order as a signature apply, and the same `409` when the job kept no
+project.
+
+Artifacts rewritten: `functions.json`, `disasm/<addr>.json` for the patched
+functions, `decompiled/<addr>.json` for those and their callers. The `count`
+fields in `disasm/index.json` and `decompiled/index.json` are left alone and
+go stale for rewritten functions; nothing reads them for correctness.
+
+Bytes are contiguous lowercase hex with no separators: `9090909090`. One patch
+is capped at 64&nbsp;KiB, one request at 4096 patches.
+
+### `GET /v1/results/{id}/patches`
+
+```json
+{
+  "job": "b8e1096aef55db4bfeb3404c",
+  "editable": true,
+  "count": 1,
+  "patch": [
+    {
+      "address": "103070",
+      "bytes": "90909090",
+      "original": "488d3d918f0100",
+      "function": "103070",
+      "at": "2026-09-04T19:41:02Z"
+    }
+  ]
+}
+```
+
+| field | meaning |
+| --- | --- |
+| `editable` | false when this job kept no Ghidra project: nothing here can be patched |
+| `patch[].original` | what the analyser saw at that address, and the only way back to it |
+| `patch[].function` | entry point of the function the patch landed in, if any |
+
+An address patched back to its `original` drops out of the ledger: it is no
+longer a patch.
+
+### `PUT /v1/results/{id}/function/{addr}/patch`
+
+```sh
+curl -sS -X PUT $API/v1/results/$id/function/103070/patch \
+  -H 'content-type: application/json' \
+  -d '{"bytes": "90909090"}'
+```
+
+```json
+{
+  "job": "b8e1096aef55db4bfeb3404c",
+  "ok": true,
+  "applied": 1,
+  "failed": 0,
+  "patch": [{ "address": "103070", "ok": true, "before": "488d3d91", "function": "103070" }],
+  "functions": ["103070"],
+  "duration_ms": 14210
+}
+```
+
+`functions` is what to re-fetch: the disassembly and the decompilation of each
+one are new. Writing the bytes that are already there is a success and a no-op,
+which is what makes replaying a saved state cheap.
+
+### `PUT /v1/results/{id}/patches`
+
+Many addresses in one headless run — one JVM start rather than forty. This is
+what restoring a whole saved state should use.
+
+```sh
+curl -sS -X PUT $API/v1/results/$id/patches \
+  -H 'content-type: application/json' \
+  -d '{"patches": [{"address": "103070", "bytes": "9090"}, {"address": "1040d0", "bytes": "c3"}]}'
+```
+
+Same response shape. `422` when any op failed, with the per-op reason in
+`patch[]` — partial success is still `422`, so a client that reads only the
+status code cannot mistake a half-applied state for a whole one.
+
+### `DELETE /v1/results/{id}/function/{addr}/patch`
+
+Writes the recorded `original` back and drops the ledger row. `404` if that
+address was never patched.
 
 ---
 

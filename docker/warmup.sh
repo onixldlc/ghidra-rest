@@ -1,15 +1,18 @@
 #!/bin/sh
 # Build time smoke test: import one small, always present binary and run the
-# export script over it.
+# export task over it.
 #
 # Two reasons this runs in the image build rather than in CI only:
-#   1. The scripts are compiled by Ghidra at first use, against whatever API
-#      this Ghidra release ships. A compile error here fails the build instead
-#      of failing the first user's job. ApplySignature.java is run too, with an
-#      empty ops file: no op is applied, but the class is compiled and cached,
-#      and a signature apply is not the place to discover it does not build.
-#   2. The compiled script is cached under $HOME, which is baked into the
+#   1. Ghidra compiles everything under -scriptPath as one bundle at first use,
+#      against whatever API this Ghidra release ships. A compile error here
+#      fails the build instead of failing the first user's job. That covers
+#      every task and every shared helper at once -- `selftest` reaches its
+#      println only if the whole bundle compiled and every task in
+#      RestRegistry constructed.
+#   2. The compiled bundle is cached under $HOME, which is baked into the
 #      image (not the /data volume), so it survives into every container.
+#
+# Adding a task needs no change here: selftest walks the registry.
 set -eu
 
 GHIDRA_HOME="${GHIDRAREST_GHIDRA_HOME:-/opt/ghidra}"
@@ -19,10 +22,6 @@ TARGET="${1:-/bin/date}"
 
 mkdir -p "${WORK}/proj" "${WORK}/out"
 
-# Empty on purpose: ApplySignature applies nothing and rewrites functions.json.
-: > "${WORK}/ops.tsv"
-: > "${WORK}/result.tsv"
-
 echo "warmup: importing ${TARGET} with $(basename "${GHIDRA_HOME}")"
 
 MAXMEM="${GHIDRAREST_JAVA_MAX_MEM:-2G}" \
@@ -30,13 +29,21 @@ MAXMEM="${GHIDRAREST_JAVA_MAX_MEM:-2G}" \
 	"${WORK}/proj" warmup \
 	-import "${TARGET}" \
 	-scriptPath "${SCRIPT_DIR}" \
-	-postScript ExportJSON.java "${WORK}/out" \
-	-postScript ApplySignature.java "${WORK}/out" "${WORK}/ops.tsv" "${WORK}/result.tsv" 30 \
+	-postScript RestScript.java export "${WORK}/out" \
+	-postScript RestScript.java selftest \
 	-analysisTimeoutPerFile 600 \
-	-deleteProject
+	-deleteProject \
+	| tee "${WORK}/headless.log"
 
 if [ ! -s "${WORK}/out/summary.json" ]; then
 	echo "warmup: analyzeHeadless produced no summary.json" >&2
+	exit 1
+fi
+
+# The registry loaded and every task constructed. Without this a task could be
+# broken in a way only its own first invocation would reveal.
+if ! grep -q "RestScript: selftest ok" "${WORK}/headless.log"; then
+	echo "warmup: selftest did not report; the script bundle did not load" >&2
 	exit 1
 fi
 

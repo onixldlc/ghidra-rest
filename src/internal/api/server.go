@@ -65,11 +65,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/results/{id}/xrefs/{addr}", s.handleXrefs)
 	mux.HandleFunc("GET /v1/results/{id}/hexdump/{addr}", s.handleHexdump)
 
-	// The only writes into Ghidra. PUT because setting a prototype is idempotent:
-	// sending the same one twice must not stack up two edits.
+	// The writes into Ghidra. PUT because both are idempotent: sending the same
+	// prototype, or the same bytes, twice must not stack up two edits.
 	mux.HandleFunc("GET /v1/results/{id}/signatures", s.handleSignatures)
 	mux.HandleFunc("PUT /v1/results/{id}/function/{addr}/signature", s.handleSetSignature)
 	mux.HandleFunc("DELETE /v1/results/{id}/function/{addr}/signature", s.handleClearSignature)
+
+	// Byte patches, applied to the same kept project. PUT for the same reason:
+	// writing the bytes that are already there is a no-op, not a second edit.
+	mux.HandleFunc("GET /v1/results/{id}/patches", s.handlePatches)
+	mux.HandleFunc("PUT /v1/results/{id}/patches", s.handleSetPatches)
+	mux.HandleFunc("PUT /v1/results/{id}/function/{addr}/patch", s.handleSetPatch)
+	mux.HandleFunc("DELETE /v1/results/{id}/function/{addr}/patch", s.handleClearPatch)
 
 	mux.HandleFunc("/", s.handleNotFound)
 

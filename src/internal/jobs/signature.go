@@ -73,10 +73,12 @@ type SigLedger struct {
 	Entries map[string]*SigEntry `json:"entries"`
 }
 
-// sigRuns serialises signature runs across the whole server. Each one is a
-// JVM sized by JAVA_MAX_MEM; letting an HTTP handler fan out into as many of
-// them as there are requests is a much worse failure than a queue.
-var sigRuns sync.Mutex
+// editRuns serialises every write-back into a Ghidra project across the whole
+// server -- signatures and byte patches alike. Each one is a JVM sized by
+// JAVA_MAX_MEM; letting an HTTP handler fan out into as many of them as there
+// are requests is a much worse failure than a queue, and two of them inside
+// one project at once is a corrupt project rather than a slow one.
+var editRuns sync.Mutex
 
 // SignaturePath is the per-job record of edited prototypes.
 func (m *Manager) SignaturePath(id string) string {
@@ -285,9 +287,9 @@ func (m *Manager) applySignatures(ctx context.Context, job *Job, ops []SigOp) ([
 	if _, err := os.Stat(bin); err != nil {
 		return nil, fmt.Errorf("analyzeHeadless not found under %s: %w", m.cfg.GhidraHome, err)
 	}
-	script := filepath.Join(m.cfg.ScriptDir, "ApplySignature.java")
+	script := filepath.Join(m.cfg.ScriptDir, "RestScript.java")
 	if _, err := os.Stat(script); err != nil {
-		return nil, fmt.Errorf("apply script not found: %w", err)
+		return nil, fmt.Errorf("task script not found: %w", err)
 	}
 
 	dir, err := os.MkdirTemp(m.tmpDir(), "sig-")
@@ -327,15 +329,16 @@ func (m *Manager) applySignatures(ctx context.Context, job *Job, ops []SigOp) ([
 		"-process",
 		"-noanalysis",
 		"-scriptPath", m.cfg.ScriptDir,
-		"-postScript", "ApplySignature.java",
+		"-postScript", "RestScript.java",
+		"signature",
 		m.ArtifactsDir(job.ID),
 		opsPath,
 		resPath,
 		strconv.Itoa(job.Options.DecompileTimeout),
 	}
 
-	sigRuns.Lock()
-	defer sigRuns.Unlock()
+	editRuns.Lock()
+	defer editRuns.Unlock()
 
 	out, runErr := m.runHeadlessTool(ctx, job, bin, args, "signature")
 
